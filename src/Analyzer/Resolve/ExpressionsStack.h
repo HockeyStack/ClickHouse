@@ -4,7 +4,6 @@
 #include <IO/Operators.h>
 #include <AggregateFunctions/AggregateFunctionFactory.h>
 #include <Analyzer/FunctionNode.h>
-#include <Analyzer/Utils.h>
 
 namespace DB
 {
@@ -24,12 +23,6 @@ public:
         {
             if (AggregateFunctionFactory::instance().isAggregateFunctionName(function->getFunctionName()))
                 ++aggregate_functions_counter;
-
-            if (isNameOfInFunction(function->getFunctionName()))
-            {
-                ++in_function_instance_counter;
-                in_function_instance_stack.push_back(in_function_instance_counter);
-            }
         }
 
         expressions.emplace_back(node);
@@ -54,9 +47,6 @@ public:
         {
             if (AggregateFunctionFactory::instance().isAggregateFunctionName(function->getFunctionName()))
                 --aggregate_functions_counter;
-
-            if (isNameOfInFunction(function->getFunctionName()))
-                in_function_instance_stack.pop_back();
         }
 
         expressions.pop_back();
@@ -87,13 +77,6 @@ public:
     bool hasAggregateFunction() const
     {
         return aggregate_functions_counter > 0;
-    }
-
-    size_t getInFunctionInstanceId() const
-    {
-        if (in_function_instance_stack.empty())
-            return 0;
-        return in_function_instance_stack.back();
     }
 
     QueryTreeNodePtr getExpressionWithAlias(const std::string & alias) const
@@ -148,8 +131,6 @@ public:
 private:
     QueryTreeNodes expressions;
     size_t aggregate_functions_counter = 0;
-    size_t in_function_instance_counter = 0;
-    std::vector<size_t> in_function_instance_stack;
     std::unordered_map<std::string, QueryTreeNodes> alias_name_to_expressions;
 };
 

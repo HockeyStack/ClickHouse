@@ -115,10 +115,17 @@ public:
             auto * function_node = node->as<FunctionNode>();
             if (isNameOfInFunction(function_node->getFunctionName()))
             {
-                auto arg = function_node->getArguments().getNodes().back();
+                auto & arg = function_node->getArguments().getNodes().back();
                 /// Avoid aliasing IN `table`
                 if (arg->getNodeType() != QueryTreeNodeType::TABLE)
-                    CreateUniqueTableAliasesVisitor(getContext()).visit(function_node->getArguments().getNodes().back());
+                {
+                    /// Clone the subtree to break sharing before mutation.
+                    /// The identifier resolution cache may return the same node for identical
+                    /// identifiers across different IN instances. Without cloning, the fresh
+                    /// visitor would overwrite aliases set by a previous IN's revisit.
+                    arg = arg->clone();
+                    CreateUniqueTableAliasesVisitor(getContext()).visit(arg);
+                }
             }
         }
     }

@@ -1275,8 +1275,7 @@ IdentifierResolveResult QueryAnalyzer::tryResolveIdentifier(const IdentifierLook
     IdentifierResolveScope & scope,
     IdentifierResolveContext identifier_resolve_context)
 {
-    IdentifierLookup cache_lookup = identifier_lookup;
-    cache_lookup.in_function_instance_id = scope.expressions_in_resolve_process_stack.getInFunctionInstanceId();
+    const auto & cache_lookup = identifier_lookup;
 
     auto it = scope.identifier_in_lookup_process.find(cache_lookup);
 
