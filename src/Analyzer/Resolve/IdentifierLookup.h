@@ -45,6 +45,7 @@ struct IdentifierLookup
     Identifier identifier;
     IdentifierLookupContext lookup_context;
     ASTPtr original_ast_node = nullptr;
+    size_t in_function_instance_id = 0;
 
     bool isExpressionLookup() const
     {
@@ -70,7 +71,8 @@ struct IdentifierLookup
 inline bool operator==(const IdentifierLookup & lhs, const IdentifierLookup & rhs)
 {
     return lhs.identifier.getFullName() == rhs.identifier.getFullName()
-        && lhs.lookup_context == rhs.lookup_context;
+        && lhs.lookup_context == rhs.lookup_context
+        && lhs.in_function_instance_id == rhs.in_function_instance_id;
 }
 
 [[maybe_unused]] inline bool operator!=(const IdentifierLookup & lhs, const IdentifierLookup & rhs)
@@ -82,8 +84,11 @@ struct IdentifierLookupHash
 {
     size_t operator()(const IdentifierLookup & identifier_lookup) const
     {
-        return std::hash<std::string>()(identifier_lookup.identifier.getFullName())
+        size_t hash = std::hash<std::string>()(identifier_lookup.identifier.getFullName())
             ^ static_cast<uint8_t>(identifier_lookup.lookup_context);
+        if (identifier_lookup.in_function_instance_id != 0)
+            hash ^= std::hash<size_t>()(identifier_lookup.in_function_instance_id) * 2654435761ULL;
+        return hash;
     }
 };
 

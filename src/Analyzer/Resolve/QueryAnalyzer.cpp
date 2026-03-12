@@ -1276,6 +1276,7 @@ IdentifierResolveResult QueryAnalyzer::tryResolveIdentifier(const IdentifierLook
     IdentifierResolveContext identifier_resolve_context)
 {
     IdentifierLookup cache_lookup = identifier_lookup;
+    cache_lookup.in_function_instance_id = scope.expressions_in_resolve_process_stack.getInFunctionInstanceId();
 
     auto it = scope.identifier_in_lookup_process.find(cache_lookup);
 
@@ -1443,7 +1444,7 @@ IdentifierResolveResult QueryAnalyzer::tryResolveIdentifier(const IdentifierLook
             /// Don't cache nodes that are in nullable_group_by_keys - they need different
             /// treatment depending on whether they're inside an aggregate function or not.
             bool in_nullable_group_by_keys = scope.nullable_group_by_keys.contains(resolve_result.resolved_identifier);
-            if (!in_nullable_group_by_keys && !hasSubqueryNode(resolve_result.resolved_identifier))
+            if (!in_nullable_group_by_keys)
                 scope.identifier_to_resolved_expression_cache.insert(cache_lookup, resolve_result);
         }
     }
