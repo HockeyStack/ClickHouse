@@ -7,6 +7,9 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if defined(OS_LINUX)
+#include <sys/prctl.h>
+#endif
 #include <pwd.h>
 #include <unistd.h>
 #include <Poco/Net/HTTPServer.h>
@@ -481,6 +484,42 @@ namespace fs = std::filesystem;
 
 int mainEntryClickHouseServer(int argc, char ** argv)
 {
+#if defined(OS_LINUX)
+    /// Resize this process's private futex hash table to avoid bucket-lock
+    /// contention (`native_queued_spin_lock_slowpath` via `futex_q_lock`) on
+    /// workloads with thousands of threads. Linux's default per-mm hash is
+    /// only 2048 buckets, which is too few for ClickHouse's thread count
+    /// under load and produces 22s soft-lockups in `futex_wake`.
+    ///
+    /// glibc 2.41+ does this automatically at pthread init, but ClickHouse
+    /// is statically linked against musl, which does not — so we must call
+    /// prctl ourselves regardless of the host's glibc version.
+    ///
+    /// Requires Linux 6.16+ (CONFIG_FUTEX_PRIVATE_HASH). On older kernels
+    /// prctl returns -1 with EINVAL or ENOSYS; we tolerate this silently.
+    #ifndef PR_FUTEX_HASH
+    #define PR_FUTEX_HASH 78
+    #define PR_FUTEX_HASH_SET_SLOTS 1
+    #endif
+
+    unsigned long futex_slots = 65536;
+    if (const char * env = getenv("CLICKHOUSE_FUTEX_HASH_SLOTS")) // NOLINT(concurrency-mt-unsafe)
+    {
+        char * end = nullptr;
+        unsigned long parsed = std::strtoul(env, &end, 10);
+        if (end != env && *end == '\0')
+            futex_slots = parsed;
+    }
+    if (futex_slots > 0
+        && -1 == prctl(PR_FUTEX_HASH, PR_FUTEX_HASH_SET_SLOTS, futex_slots, 0UL, 0UL)
+        && errno != EINVAL
+        && errno != ENOSYS)
+    {
+        std::cerr << "Cannot prctl(PR_FUTEX_HASH, SET_SLOTS, " << futex_slots
+                  << "): " << errnoToString() << '\n';
+    }
+#endif
+
     DB::Server app;
 
     /// Do not fork separate process from watchdog if we attached to terminal.
