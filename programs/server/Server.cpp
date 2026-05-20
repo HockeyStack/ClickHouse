@@ -2,11 +2,16 @@
 #include <Common/CurrentThread.h>
 #include <Common/QueryScope.h>
 
+#include <cerrno>
+#include <cstdlib>
 #include <memory>
 #include <Interpreters/ClientInfo.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if defined(OS_LINUX)
+#include <sys/prctl.h>
+#endif
 #include <pwd.h>
 #include <unistd.h>
 #include <Poco/Net/HTTPServer.h>
@@ -546,6 +551,55 @@ namespace fs = std::filesystem;
 int mainEntryClickHouseServer(int argc, char ** argv);
 int mainEntryClickHouseServer(int argc, char ** argv)
 {
+#if defined(OS_LINUX)
+    /// Resize this process's private futex hash table to avoid bucket-lock
+    /// contention (`native_queued_spin_lock_slowpath` via `futex_q_lock`) on
+    /// workloads with thousands of threads. The kernel's default futex hash
+    /// can be too small for ClickHouse's thread count under load and produce
+    /// long stalls in `futex_wake`.
+    ///
+    /// glibc 2.41+ does this automatically at `pthread` init, but ClickHouse
+    /// is statically linked against musl, which does not, so we must call
+    /// `prctl` ourselves regardless of the host's glibc version.
+    ///
+    /// Requires Linux 6.17+ (CONFIG_FUTEX_PRIVATE_HASH). On older kernels
+    /// `prctl` returns -1 with `EINVAL` or `ENOSYS`; we tolerate this silently.
+    /// Each slot uses 64 bytes, so the default costs about 4 MiB per process.
+    #ifndef PR_FUTEX_HASH
+    #define PR_FUTEX_HASH 78
+    #define PR_FUTEX_HASH_SET_SLOTS 1
+    #endif
+
+    unsigned long futex_slots = 65536;
+    bool explicit_futex_slots = false;
+    if (const char * env = getenv("CLICKHOUSE_FUTEX_HASH_SLOTS")) // NOLINT(concurrency-mt-unsafe)
+    {
+        char * end = nullptr;
+        errno = 0;
+        unsigned long parsed = std::strtoul(env, &end, 10);
+        const bool valid_number = end != env && *end == '\0' && errno != ERANGE;
+        const bool valid_slot_count = parsed == 0 || (parsed >= 2 && (parsed & (parsed - 1)) == 0);
+        if (valid_number && valid_slot_count)
+        {
+            futex_slots = parsed;
+            explicit_futex_slots = true;
+        }
+        else
+        {
+            std::cerr << "Ignoring invalid CLICKHOUSE_FUTEX_HASH_SLOTS value: " << env
+                      << ". Expected 0 or a power of two greater than or equal to 2.\n";
+        }
+    }
+    if (futex_slots > 0
+        && -1 == prctl(PR_FUTEX_HASH, PR_FUTEX_HASH_SET_SLOTS, futex_slots, 0UL, 0UL)
+        && (errno != EINVAL || explicit_futex_slots)
+        && errno != ENOSYS)
+    {
+        std::cerr << "Cannot prctl(PR_FUTEX_HASH, SET_SLOTS, " << futex_slots
+                  << "): " << errnoToString() << '\n';
+    }
+#endif
+
     DB::Server app;
 
     /// Do not fork separate process from watchdog if we attached to terminal.
