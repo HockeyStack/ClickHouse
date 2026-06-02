@@ -21,6 +21,7 @@
 #include <Storages/System/attachInformationSchemaTables.h>
 #include <Interpreters/DatabaseCatalog.h>
 #include <Interpreters/JIT/CompiledExpressionCache.h>
+#include <Functions/MultiSearchAhoCorasickCache.h>
 #include <Interpreters/ProcessList.h>
 #include <Interpreters/loadMetadata.h>
 #include <Interpreters/registerInterpreters.h>
@@ -97,6 +98,8 @@ namespace ServerSetting
     extern const ServerSettingsUInt64 jemalloc_profiler_sampling_rate;
     extern const ServerSettingsUInt64 compiled_expression_cache_elements_size;
     extern const ServerSettingsUInt64 compiled_expression_cache_size;
+    extern const ServerSettingsUInt64 multi_search_automaton_cache_size;
+    extern const ServerSettingsUInt64 multi_search_automaton_cache_elements_size;
     extern const ServerSettingsUInt64 database_catalog_drop_table_concurrency;
     extern const ServerSettingsString default_database;
     extern const ServerSettingsString index_mark_cache_policy;
@@ -1080,6 +1083,12 @@ void LocalServer::processConfig()
     size_t compiled_expression_cache_max_size_in_bytes = server_settings[ServerSetting::compiled_expression_cache_size];
     size_t compiled_expression_cache_max_elements = server_settings[ServerSetting::compiled_expression_cache_elements_size];
     CompiledExpressionCacheFactory::instance().init(compiled_expression_cache_max_size_in_bytes, compiled_expression_cache_max_elements);
+#endif
+
+#if USE_AHO_CORASICK
+    MultiSearchAhoCorasickCacheFactory::instance().init(
+        server_settings[ServerSetting::multi_search_automaton_cache_size],
+        server_settings[ServerSetting::multi_search_automaton_cache_elements_size]);
 #endif
 
     NamedCollectionFactory::instance().loadIfNot();

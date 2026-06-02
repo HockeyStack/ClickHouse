@@ -85,6 +85,7 @@
 #include <Interpreters/loadMetadata.h>
 #include <Interpreters/registerInterpreters.h>
 #include <Interpreters/JIT/CompiledExpressionCache.h>
+#include <Functions/MultiSearchAhoCorasickCache.h>
 #include <Access/AccessControl.h>
 #include <Access/ContextAccess.h>
 #include <Access/User.h>
@@ -221,6 +222,8 @@ namespace ServerSetting
     extern const ServerSettingsUInt64 cgroups_memory_usage_observer_wait_time;
     extern const ServerSettingsUInt64 compiled_expression_cache_elements_size;
     extern const ServerSettingsUInt64 compiled_expression_cache_size;
+    extern const ServerSettingsUInt64 multi_search_automaton_cache_size;
+    extern const ServerSettingsUInt64 multi_search_automaton_cache_elements_size;
     extern const ServerSettingsUInt64 concurrent_threads_soft_limit_num;
     extern const ServerSettingsUInt64 concurrent_threads_soft_limit_ratio_to_cores;
     extern const ServerSettingsString concurrent_threads_scheduler;
@@ -2157,6 +2160,12 @@ try
     size_t compiled_expression_cache_max_size_in_bytes = server_settings[ServerSetting::compiled_expression_cache_size];
     size_t compiled_expression_cache_max_elements = server_settings[ServerSetting::compiled_expression_cache_elements_size];
     CompiledExpressionCacheFactory::instance().init(compiled_expression_cache_max_size_in_bytes, compiled_expression_cache_max_elements);
+#endif
+
+#if USE_AHO_CORASICK
+    MultiSearchAhoCorasickCacheFactory::instance().init(
+        server_settings[ServerSetting::multi_search_automaton_cache_size],
+        server_settings[ServerSetting::multi_search_automaton_cache_elements_size]);
 #endif
 
     NamedCollectionFactory::instance().loadIfNot();

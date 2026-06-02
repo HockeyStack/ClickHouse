@@ -3,6 +3,14 @@
 #include <vector>
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnString.h>
+#include <Common/VectorWithMemoryTracking.h>
+#include <base/scope_guard.h>
+#include "config.h"
+
+#if USE_AHO_CORASICK
+#    include <Functions/MultiSearchAhoCorasickCache.h>
+#    include <aho_corasick.h>
+#endif
 
 
 namespace DB
@@ -10,7 +18,7 @@ namespace DB
 
 namespace ErrorCodes
 {
-    extern const int TOO_MANY_ARGUMENTS_FOR_FUNCTION;
+    extern const int NOT_IMPLEMENTED;
 }
 
 template <typename Name, typename Impl>
@@ -34,13 +42,24 @@ struct MultiSearchImpl
         size_t /*max_hyperscan_regexp_length*/,
         size_t /*max_hyperscan_regexp_total_length*/,
         bool /*reject_expensive_hyperscan_regexps*/,
+        bool force_daachorse,
         size_t input_rows_count)
     {
         // For performance of Volnitsky search, it is crucial to save only one byte for pattern number.
-        if (needles_arr.size() > std::numeric_limits<UInt8>::max())
-            throw Exception(ErrorCodes::TOO_MANY_ARGUMENTS_FOR_FUNCTION,
-                "Number of arguments for function {} doesn't match: passed {}, should be at most {}",
-                name, needles_arr.size(), std::to_string(std::numeric_limits<UInt8>::max()));
+        // When more than 255 patterns are provided, or when force_daachorse is set,
+        // use Aho-Corasick (daachorse) which handles thousands of patterns efficiently.
+        if (force_daachorse || needles_arr.size() > std::numeric_limits<UInt8>::max())
+        {
+#if USE_AHO_CORASICK
+            vectorConstantAhoCorasick(haystack_data, haystack_offsets, needles_arr, res, input_rows_count);
+            return;
+#else
+            throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+                "Function {} with more than 255 patterns requires Aho-Corasick support which is not available in this build. "
+                "Either recompile with Aho-Corasick support enabled or reduce patterns to 255 or fewer.",
+                name);
+#endif
+        }
 
         std::vector<std::string_view> needles;
         needles.reserve(needles_arr.size());
@@ -69,6 +88,52 @@ struct MultiSearchImpl
             std::fill(res.begin(), res.end(), 0);
     }
 
+#if USE_AHO_CORASICK
+    /// Aho-Corasick based search for large pattern sets (>255 patterns) or when forced.
+    /// The compiled automaton is reused across blocks via a server-global, memory-bounded cache.
+    static void vectorConstantAhoCorasick(
+        const ColumnString::Chars & haystack_data,
+        const ColumnString::Offsets & haystack_offsets,
+        const Array & needles_arr,
+        PaddedPODArray<UInt8> & res,
+        size_t input_rows_count)
+    {
+        res.resize(input_rows_count);
+
+        if (needles_arr.empty())
+        {
+            std::fill(res.begin(), res.end(), 0);
+            return;
+        }
+
+        /// An empty needle is a substring of every haystack, so any empty needle means every row
+        /// matches. This also preserves the legacy contract and avoids daachorse's rejection of
+        /// empty patterns.
+        for (const auto & needle : needles_arr)
+        {
+            if (needle.safeGet<String>().empty())
+            {
+                std::fill(res.begin(), res.end(), 1);
+                return;
+            }
+        }
+
+        constexpr uint8_t case_mode = Impl::case_sensitive
+            ? AHO_CORASICK_CASE_SENSITIVE
+            : (Impl::is_utf8 ? AHO_CORASICK_CASE_INSENSITIVE_UTF8 : AHO_CORASICK_CASE_INSENSITIVE_ASCII);
+
+        /// Keep the automaton alive for the whole search even if it is evicted concurrently.
+        auto automaton = getOrBuildAhoCorasickAutomaton(case_mode, needles_arr);
+
+        aho_corasick_search_batch(
+            automaton->handle,
+            reinterpret_cast<const uint8_t *>(haystack_data.data()),
+            reinterpret_cast<const uint64_t *>(haystack_offsets.data()),
+            static_cast<uint64_t>(input_rows_count),
+            reinterpret_cast<uint8_t *>(res.data()));
+    }
+#endif
+
     static void vectorVector(
         const ColumnString::Chars & haystack_data,
         const ColumnString::Offsets & haystack_offsets,
@@ -80,6 +145,7 @@ struct MultiSearchImpl
         size_t /*max_hyperscan_regexp_length*/,
         size_t /*max_hyperscan_regexp_total_length*/,
         bool /*reject_expensive_hyperscan_regexps*/,
+        bool /*force_daachorse*/,
         size_t input_rows_count)
     {
         res.resize(input_rows_count);
