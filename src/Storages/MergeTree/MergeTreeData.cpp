@@ -56,6 +56,7 @@
 #include <Interpreters/TreeRewriter.h>
 #include <Interpreters/convertFieldToType.h>
 #include <Interpreters/evaluateConstantExpression.h>
+#include <Interpreters/MaterializedColumnDependencies.h>
 #include <Interpreters/inplaceBlockConversions.h>
 #include <Parsers/ASTAlterQuery.h>
 #include <Parsers/ASTAssignment.h>
@@ -375,6 +376,7 @@ namespace ErrorCodes
     extern const int DATA_TYPE_CANNOT_BE_USED_IN_KEY;
     extern const int TOO_LARGE_LIGHTWEIGHT_UPDATES;
     extern const int FAULT_INJECTED;
+    extern const int CANNOT_UPDATE_COLUMN;
 }
 
 namespace FailPoints
@@ -4386,6 +4388,7 @@ void checkVersionColumnTypesConversion(const IDataType * old_type, const IDataTy
     }
 }
 
+
 }
 
 void MergeTreeData::checkAlterIsPossible(const AlterCommands & commands, ContextPtr local_context) const
@@ -4682,6 +4685,32 @@ void MergeTreeData::checkAlterIsPossible(const AlterCommands & commands, Context
     const auto index_mode = (*settings_from_storage)[MergeTreeSetting::alter_column_secondary_index_mode];
     auto unfinished_mutations = getUnfinishedMutationCommands();
     std::optional<NameDependencies> name_deps{};
+
+    std::optional<MaterializedColumnDependencies> materialized_dependencies_for_clear;
+    auto get_materialized_dependencies_for_clear = [&]() -> const MaterializedColumnDependencies &
+    {
+        if (!materialized_dependencies_for_clear)
+        {
+            NamesAndTypesList all_columns_with_ephemeral = old_metadata.getColumns().getAllPhysical();
+            NameSet ephemeral_columns;
+            for (const auto & column : old_metadata.getColumns().getEphemeral())
+            {
+                ephemeral_columns.insert(column.name);
+                all_columns_with_ephemeral.push_back(column);
+            }
+
+            MaterializedColumnDependencyOptions options;
+            options.ephemeral_columns = &ephemeral_columns;
+
+            materialized_dependencies_for_clear = buildMaterializedColumnDependencies(
+                old_metadata.getColumns(),
+                all_columns_with_ephemeral,
+                local_context,
+                options);
+        }
+
+        return *materialized_dependencies_for_clear;
+    };
     for (const AlterCommand & command : commands)
     {
         checkDropOrRenameCommandDoesntAffectInProgressMutations(command, unfinished_mutations, local_context);
@@ -4822,6 +4851,24 @@ void MergeTreeData::checkAlterIsPossible(const AlterCommands & commands, Context
                     "Trying to ALTER DROP column {} whose subcolumns ({}) are part of key expression",
                     backQuoteIfNeed(command.column_name),
                     boost::join(column_to_subcolumns_used_in_keys[command.column_name], ", "));
+            }
+
+            if (command.clear)
+            {
+                auto cleared_column_names = getPhysicalColumnNamesForClear(old_metadata.columns, command.column_name);
+
+                auto affected_materialized_columns = getAffectedMaterializedColumns(
+                    get_materialized_dependencies_for_clear(),
+                    cleared_column_names);
+
+                for (const auto & materialized_column : affected_materialized_columns)
+                {
+                    if (columns_in_keys.contains(materialized_column))
+                        throw Exception(ErrorCodes::CANNOT_UPDATE_COLUMN,
+                            "Cleared column {} affects `MATERIALIZED` column {}, which is a key column. Cannot CLEAR COLUMN",
+                            backQuoteIfNeed(command.column_name),
+                            backQuoteIfNeed(materialized_column));
+                }
             }
 
             if (!command.clear)
