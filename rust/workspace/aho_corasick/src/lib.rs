@@ -100,14 +100,6 @@ pub unsafe extern "C" fn aho_corasick_create(
             pattern_vec.push(fold_owned(pattern, case_mode));
         }
 
-        // De-duplicate after folding: patterns that differ only in case collapse to the same
-        // bytes, and daachorse returns DuplicatePatternError for duplicates. sort_unstable + dedup
-        // avoids cloning every pattern into a HashSet; the reordering is harmless because the
-        // automaton is only used for boolean any-match (multiSearchAny), so needle order never
-        // affects results.
-        pattern_vec.sort_unstable();
-        pattern_vec.dedup();
-
         let builder_result = DoubleArrayAhoCorasickBuilder::new()
             .match_kind(MatchKind::LeftmostFirst)
             .build(&pattern_vec);

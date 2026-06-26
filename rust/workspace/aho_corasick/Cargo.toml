@@ -4,7 +4,7 @@ name = "_ch_rust_aho_corasick"
 version = "0.1.0"
 
 [dependencies]
-daachorse = "1.0"
+daachorse = "3.0"
 
 [lib]
 crate-type = ["staticlib"]

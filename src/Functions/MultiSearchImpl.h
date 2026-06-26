@@ -107,8 +107,7 @@ struct MultiSearchImpl
         }
 
         /// An empty needle is a substring of every haystack, so any empty needle means every row
-        /// matches. This also preserves the legacy contract and avoids daachorse's rejection of
-        /// empty patterns.
+        /// matches — short-circuit without building an automaton.
         for (const auto & needle : needles_arr)
         {
             if (needle.safeGet<String>().empty())
