@@ -335,7 +335,8 @@ void MergeTreeDataMergerMutator::updateTTLMergeTimes(const MergeSelectorChoices 
 PartitionIdsHint MergeTreeDataMergerMutator::getPartitionsThatMayBeMerged(
     const PartsCollectorPtr & parts_collector,
     const MergePredicatePtr & merge_predicate,
-    const MergeSelectorApplier & selector) const
+    const MergeSelectorApplier & selector,
+    const std::optional<PartitionIdsHint> & partitions_to_check) const
 {
     const auto context = data.getContext();
     const auto settings = data.getSettings();
@@ -345,7 +346,7 @@ PartitionIdsHint MergeTreeDataMergerMutator::getPartitionsThatMayBeMerged(
     const bool can_use_ttl_merges = !ttl_merges_blocker.isCancelled();
     LogSeriesLimiter series_log(log, 1, /*interval_s_=*/60 * 30);
 
-    auto collected = grabAllPossibleRanges(parts_collector, metadata_snapshot, storage_policy, current_time, std::nullopt, series_log);
+    auto collected = grabAllPossibleRanges(parts_collector, metadata_snapshot, storage_policy, current_time, partitions_to_check, series_log);
     if (collected.ranges.empty())
         return {};
 
