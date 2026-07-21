@@ -53,6 +53,7 @@ struct MultiMatchAllIndicesImpl
         size_t max_hyperscan_regexp_length,
         size_t max_hyperscan_regexp_total_length,
         bool reject_expensive_hyperscan_regexps,
+        bool /*force_daachorse*/,
         size_t input_rows_count)
     {
         vectorConstant(haystack_data, haystack_offsets, needles_arr, res, offsets, std::nullopt, allow_hyperscan, max_hyperscan_regexp_length, max_hyperscan_regexp_total_length, reject_expensive_hyperscan_regexps, input_rows_count);
@@ -163,6 +164,7 @@ struct MultiMatchAllIndicesImpl
         size_t max_hyperscan_regexp_length,
         size_t max_hyperscan_regexp_total_length,
         bool reject_expensive_hyperscan_regexps,
+        bool /*force_daachorse*/,
         size_t input_rows_count)
     {
         vectorVector(haystack_data, haystack_offsets, needles_data, needles_offsets, res, offsets, std::nullopt, allow_hyperscan, max_hyperscan_regexp_length, max_hyperscan_regexp_total_length, reject_expensive_hyperscan_regexps, input_rows_count);

@@ -899,6 +899,13 @@ if (TARGET ch_rust::skim)
     target_link_libraries(dbms PUBLIC ch_rust::skim)
 endif()
 
+# MergeTreeIndexConditionText.cpp includes Functions/MultiSearchImpl.h, which pulls in the
+# Aho-Corasick FFI header. dbms only needs the header (it calls the inline needle-limit check, not
+# the FFI), so expose the include directory without linking the crate.
+if (TARGET ch_rust::aho_corasick)
+    target_include_directories(dbms PRIVATE $<TARGET_PROPERTY:ch_rust::aho_corasick,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
+
 if (TARGET ch_contrib::google_cloud_cpp)
     target_link_libraries(dbms PUBLIC ch_contrib::google_cloud_cpp)
 endif()
