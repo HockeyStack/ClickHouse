@@ -120,7 +120,7 @@ public:
                 col_haystack_vector->getChars(), col_haystack_vector->getOffsets(),
                 col_needles_const->getValue<Array>(),
                 vec_res, offsets_res,
-                edit_distance,
+                std::optional<UInt32>(edit_distance),
                 allow_hyperscan, max_hyperscan_regexp_length, max_hyperscan_regexp_total_length, reject_expensive_hyperscan_regexps,
                 input_rows_count);
         else
@@ -128,7 +128,7 @@ public:
                 col_haystack_vector->getChars(), col_haystack_vector->getOffsets(),
                 col_needles_vector->getData(), col_needles_vector->getOffsets(),
                 vec_res, offsets_res,
-                edit_distance,
+                std::optional<UInt32>(edit_distance),
                 allow_hyperscan, max_hyperscan_regexp_length, max_hyperscan_regexp_total_length, reject_expensive_hyperscan_regexps,
                 input_rows_count);
 
