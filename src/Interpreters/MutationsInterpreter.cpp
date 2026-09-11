@@ -616,6 +616,16 @@ static NameSet getKeyColumns(const MutationsInterpreter::Source & source, const 
     return key_columns;
 }
 
+/// The physical columns a `CLEAR COLUMN` removes. A `Nested` group names no column of its
+/// own, so the group stands for its physical subcolumns.
+static NameSet getClearedPhysicalColumns(const ColumnsDescription & columns_desc, const String & column_name)
+{
+    if (columns_desc.has(column_name))
+        return {column_name};
+
+    return columns_desc.getNested(column_name).getNameSet();
+}
+
 static void validateUpdateColumns(
     const MutationsInterpreter::Source & source,
     const StorageMetadataPtr & metadata_snapshot,
@@ -767,7 +777,8 @@ void MutationsInterpreter::prepare(bool dry_run)
         if (command.type == MutationCommand::DROP_COLUMN && command.clear)
         {
             has_clear_column = true;
-            clear_column_names.insert(command.column_name);
+            NameSet cleared_physical_columns = getClearedPhysicalColumns(columns_desc, command.column_name);
+            clear_column_names.insert(cleared_physical_columns.begin(), cleared_physical_columns.end());
         }
 
         /// The _row_exists mask is handled by APPLY_DELETED_MASK, not as a data column.
@@ -991,10 +1002,25 @@ void MutationsInterpreter::prepare(bool dry_run)
     if (!patch_updated_columns.empty())
         patch_affected_materialized = affected_materialized_closure(patch_updated_columns);
 
-    /// CLEAR uses only the readable dependency closure.
+    /// CLEAR uses only the readable dependency closure. A key column in that closure must refuse
+    /// the rewrite, since the new value would break the sort or partition key.
     NameSet clear_affected_materialized;
     if (!clear_column_names.empty())
+    {
         clear_affected_materialized = affected_materialized_closure(clear_column_names);
+        if (!clear_affected_materialized.empty())
+        {
+            NameSet key_columns = getKeyColumns(source, metadata_snapshot);
+            for (const auto & materialized_column : clear_affected_materialized)
+            {
+                if (key_columns.contains(materialized_column))
+                    throw Exception(
+                        ErrorCodes::CANNOT_UPDATE_COLUMN,
+                        "Cleared columns affect `MATERIALIZED` column {}, which is a key column. Cannot CLEAR COLUMN",
+                        backQuote(materialized_column));
+            }
+        }
+    }
 
     /// Recomputed MATERIALIZED columns also invalidate their stored artifacts.
     NameSet all_affected_materialized;
@@ -1527,13 +1553,15 @@ void MutationsInterpreter::prepare(bool dry_run)
         }
         else if (command.type == MutationCommand::DROP_COLUMN && command.clear)
         {
+            NameSet cleared_physical_columns = getClearedPhysicalColumns(columns_desc, command.column_name);
+
             /// Rebuild indices that depend on the cleared column from its
             /// post-CLEAR DEFAULT value. Dropping them would make index
             /// availability depend on whether the value had physical files.
             for (const auto & index : metadata_snapshot->getSecondaryIndices())
             {
                 const auto & index_cols = index.expression->getRequiredColumns();
-                if (std::find(index_cols.begin(), index_cols.end(), command.column_name) == index_cols.end())
+                if (!std::ranges::any_of(index_cols, [&](const auto & col) { return cleared_physical_columns.contains(col); }))
                     continue;
 
                 switch (index_mode)
@@ -1557,19 +1585,20 @@ void MutationsInterpreter::prepare(bool dry_run)
             for (const auto & projection : metadata_snapshot->getProjections())
             {
                 const auto & projection_cols = projection.required_columns;
-                if (std::find(projection_cols.begin(), projection_cols.end(), command.column_name) != projection_cols.end())
+                if (std::ranges::any_of(projection_cols, [&](const auto & col) { return cleared_physical_columns.contains(col); }))
                 {
                     for (const auto & col : projection_cols)
                         dependencies.emplace(col, ColumnDependency::PROJECTION);
-                    cleared_columns_with_dependencies.insert(command.column_name);
+                    cleared_columns_with_dependencies.insert(cleared_physical_columns.begin(), cleared_physical_columns.end());
                     materialized_projections.insert(projection.name);
                 }
             }
 
             if (!clear_affected_materialized.empty())
             {
-                cleared_columns_with_dependencies.insert(command.column_name);
-                dependencies.emplace(command.column_name, ColumnDependency::PROJECTION);
+                cleared_columns_with_dependencies.insert(cleared_physical_columns.begin(), cleared_physical_columns.end());
+                for (const auto & column : cleared_physical_columns)
+                    dependencies.emplace(column, ColumnDependency::PROJECTION);
             }
         }
         /// The following mutations handled separately:
