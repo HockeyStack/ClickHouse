@@ -585,6 +585,16 @@ static NameSet getKeyColumns(const MutationsInterpreter::Source & source, const 
     return key_columns;
 }
 
+/// The physical columns a `CLEAR COLUMN` removes. A `Nested` group names no column of its
+/// own, so the group stands for its physical subcolumns.
+static NameSet getClearedPhysicalColumns(const ColumnsDescription & columns_desc, const String & column_name)
+{
+    if (columns_desc.has(column_name))
+        return {column_name};
+
+    return columns_desc.getNested(column_name).getNameSet();
+}
+
 static void validateUpdateColumns(
     const MutationsInterpreter::Source & source,
     const StorageMetadataPtr & metadata_snapshot,
@@ -736,7 +746,8 @@ void MutationsInterpreter::prepare(bool dry_run)
         if (command.type == MutationCommand::DROP_COLUMN && command.clear)
         {
             has_clear_column = true;
-            clear_column_names.insert(command.column_name);
+            NameSet cleared_physical_columns = getClearedPhysicalColumns(columns_desc, command.column_name);
+            clear_column_names.insert(cleared_physical_columns.begin(), cleared_physical_columns.end());
         }
 
         /// The _row_exists mask is handled by APPLY_DELETED_MASK, not as a data column.
@@ -965,14 +976,30 @@ void MutationsInterpreter::prepare(bool dry_run)
         patch_affected_materialized = affected_materialized_closure(patch_updated_columns);
 
     /// MATERIALIZED columns rewritten by a CLEAR COLUMN. Must stay equal to the set the recompute
-    /// below writes, otherwise a rewritten column keeps stale dependent artifacts.
+    /// below writes, otherwise a rewritten column keeps stale dependent artifacts. The closure of
+    /// the cleared columns decides whether a recompute happens at all, and a key column in that
+    /// closure must refuse the rewrite, since the new value would break the sort or partition key.
     NameSet clear_affected_materialized;
-    if (!clear_column_names.empty() && !affected_materialized_closure(clear_column_names).empty())
+    if (!clear_column_names.empty())
     {
-        for (const auto & column : columns_desc)
+        NameSet cleared_materialized_columns = affected_materialized_closure(clear_column_names);
+        if (!cleared_materialized_columns.empty())
         {
-            if (column.default_desc.kind == ColumnDefaultKind::Materialized && column.default_desc.expression)
-                clear_affected_materialized.insert(column.name);
+            NameSet key_columns = getKeyColumns(source, metadata_snapshot);
+            for (const auto & materialized_column : cleared_materialized_columns)
+            {
+                if (key_columns.contains(materialized_column))
+                    throw Exception(
+                        ErrorCodes::CANNOT_UPDATE_COLUMN,
+                        "Cleared columns affect `MATERIALIZED` column {}, which is a key column. Cannot CLEAR COLUMN",
+                        backQuote(materialized_column));
+            }
+
+            for (const auto & column : columns_desc)
+            {
+                if (column.default_desc.kind == ColumnDefaultKind::Materialized && column.default_desc.expression)
+                    clear_affected_materialized.insert(column.name);
+            }
         }
     }
 
@@ -1511,11 +1538,13 @@ void MutationsInterpreter::prepare(bool dry_run)
         }
         else if (command.type == MutationCommand::DROP_COLUMN && command.clear)
         {
+            NameSet cleared_physical_columns = getClearedPhysicalColumns(columns_desc, command.column_name);
+
             /// When clearing a column, we need to also clear any indices that depend on it
             for (const auto & index : metadata_snapshot->getSecondaryIndices())
             {
                 const auto & index_cols = index.expression->getRequiredColumns();
-                if (std::find(index_cols.begin(), index_cols.end(), command.column_name) != index_cols.end())
+                if (std::ranges::any_of(index_cols, [&](const auto & col) { return cleared_physical_columns.contains(col); }))
                     dropped_indices.insert(index.name);
             }
             /// When clearing a column, we also need to rebuild any projections that depend on it,
@@ -1526,52 +1555,39 @@ void MutationsInterpreter::prepare(bool dry_run)
             for (const auto & projection : metadata_snapshot->getProjections())
             {
                 const auto & projection_cols = projection.required_columns;
-                if (std::find(projection_cols.begin(), projection_cols.end(), command.column_name) != projection_cols.end())
+                if (std::ranges::any_of(projection_cols, [&](const auto & col) { return cleared_physical_columns.contains(col); }))
                 {
                     for (const auto & col : projection_cols)
                         dependencies.emplace(col, ColumnDependency::PROJECTION);
-                    cleared_columns_with_dependencies.insert(command.column_name);
+                    cleared_columns_with_dependencies.insert(cleared_physical_columns.begin(), cleared_physical_columns.end());
                     materialized_projections.insert(projection.name);
                 }
             }
 
-            /// When clearing a column, any MATERIALIZED column whose expression
-            /// depends on the cleared column must be recalculated so its stored
-            /// data stays consistent with the new (default) value.
-            /// We must check every CLEAR COLUMN command (not short-circuit after the
-            /// first match) so that all cleared columns used by materialized
-            /// expressions are registered in `cleared_columns_with_dependencies`.
-            bool has_dependent_materialized = false;
-            for (const auto & column : columns_desc)
-            {
-                if (column.default_desc.kind != ColumnDefaultKind::Materialized
-                    || !available_columns_set.contains(column.name)
-                    || !column.default_desc.expression)
-                    continue;
-
-                auto query = column.default_desc.expression->clone();
-                replaceSubcolumnsToGetSubcolumnFunctionInQuery(query, all_columns);
-                auto syntax_result = TreeRewriter(context).analyze(query, all_columns);
-                for (const auto & dep : syntax_result->requiredSourceColumns())
+            /// When clearing a column, any MATERIALIZED column whose expression depends on a cleared
+            /// column must be recalculated so its stored data stays consistent with the new (default)
+            /// value. The dependency graph built above answers that, and it holds the physical
+            /// subcolumns of a cleared `Nested` group under their own names.
+            bool has_dependent_materialized = std::ranges::any_of(materialized_column_dependencies,
+                [&](const auto & materialized_column)
                 {
-                    if (dep == command.column_name)
+                    return std::ranges::any_of(materialized_column.second, [&](const auto & dependency)
                     {
-                        has_dependent_materialized = true;
-                        break;
-                    }
-                }
-                if (has_dependent_materialized)
-                    break;
-            }
+                        return cleared_physical_columns.contains(dependency);
+                    });
+                });
 
             if (has_dependent_materialized)
             {
                 need_recalculate_materialized_for_clear = true;
-                /// Ensure the cleared column enters the readonly stage
-                /// with its default value so the materialized expression
-                /// evaluates correctly.
-                dependencies.emplace(command.column_name, ColumnDependency::PROJECTION);
-                cleared_columns_with_dependencies.insert(command.column_name);
+                for (const auto & column : cleared_physical_columns)
+                {
+                    /// Ensure the cleared column enters the readonly stage
+                    /// with its default value so the materialized expression
+                    /// evaluates correctly.
+                    dependencies.emplace(column, ColumnDependency::PROJECTION);
+                    cleared_columns_with_dependencies.insert(column);
+                }
             }
         }
         /// The following mutations handled separately:
