@@ -316,6 +316,7 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"use_constant_folding_in_index_analysis", false, false, "New setting to fold partition-level constants into the filter predicate per part during MergeTree index analysis, improving pruning for filters whose branches depend on partition values."},
             {"join_runtime_filter_size_from_hash_table_stats", false, true, "Use hash table size statistics collected from previous executions to size the JOIN runtime filter. When disabled, fall back to the fixed `join_runtime_bloom_filter_bytes`."},
             {"statistics_max_set_size_for_exact_selectivity_estimation", 10000, 10000, "The bound on the cost of estimating the selectivity of `IN` with a large set is kept under `compatibility` with an earlier version: the previous value is deliberately equal to the new one, so that the uncapped estimation, which could add hundreds of milliseconds to the planning of a single query, is not restored."},
+            {"force_daachorse_for_multi_search", false, false, "New setting. Force use of the Double-Array Aho-Corasick algorithm for the `multiSearchAny*` family of functions regardless of pattern count."},
         });
 
         addSettingsChanges(settings_changes_history, "26.6",
