@@ -124,7 +124,7 @@ echo "Building ClickHouse (amd_release) in ${REPO_ROOT}..."
 echo "Build log: ${LOG_FILE}"
 
 JOB_EXPORTS=""
-CARGO_JOBS="${CARGO_BUILD_JOBS:-${BUILD_JOBS:-1}}"
+CARGO_JOBS="${CARGO_BUILD_JOBS:-${BUILD_JOBS:-$(nproc)}}"
 CMAKE_JOB_FLAGS="-UPARALLEL_COMPILE_JOBS -DPARALLEL_LINK_JOBS=2"
 if [[ -n "${BUILD_JOBS}" ]]; then
     JOB_EXPORTS="export CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}; "
