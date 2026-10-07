@@ -17,19 +17,19 @@ CLEAN_BUILD="${CLEAN_BUILD:-1}"
 IMAGE="clickhouse/binary-builder:local"
 
 sync_rust_locks_to_vendor() {
-    docker run --rm --platform linux/amd64 \
+    docker run --rm \
       -v "${REPO_ROOT}:/ClickHouse" \
       -w /ClickHouse \
       "$IMAGE" \
-      bash -lc "cd /ClickHouse/rust/workspace && /rust/rustup/toolchains/nightly-2026-03-22-x86_64-unknown-linux-gnu/bin/cargo update --config=/ClickHouse/${BUILD_DIR}/contrib/corrosion-cmake/config.toml --offline"
+      bash -lc "cd /ClickHouse/rust/workspace && /rust/rustup/toolchains/nightly-2026-03-22-\$(uname -m)-unknown-linux-gnu/bin/cargo update --config=/ClickHouse/${BUILD_DIR}/contrib/corrosion-cmake/config.toml --offline"
 
-    docker run --rm --platform linux/amd64 \
+    docker run --rm \
       -v "${REPO_ROOT}:/ClickHouse" \
       -w /ClickHouse/contrib/chdig \
       "$IMAGE" \
       bash -lc '
 set -e
-cargo=/rust/rustup/toolchains/nightly-2026-03-22-x86_64-unknown-linux-gnu/bin/cargo
+cargo=/rust/rustup/toolchains/nightly-2026-03-22-$(uname -m)-unknown-linux-gnu/bin/cargo
 update_precise() {
     pkg="$1"
     from="$2"
@@ -91,15 +91,15 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     read -p "Build locally? [y/N] " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "Building clickhouse/fasttest:local (amd64)..."
-        docker build --platform linux/amd64 --network=host -t clickhouse/fasttest:local "${REPO_ROOT}/ci/docker/fasttest/"
+        echo "Building clickhouse/fasttest:local..."
+        docker build --network=host -t clickhouse/fasttest:local "${REPO_ROOT}/ci/docker/fasttest/"
 
-        echo "Building clickhouse/binary-builder:local (amd64)..."
-        docker build --platform linux/amd64 --network=host --build-arg FROM_TAG=local -t clickhouse/binary-builder:local "${REPO_ROOT}/ci/docker/binary-builder/"
+        echo "Building clickhouse/binary-builder:local..."
+        docker build --network=host --build-arg FROM_TAG=local -t clickhouse/binary-builder:local "${REPO_ROOT}/ci/docker/binary-builder/"
     else
         echo "Aborted. You can also manually build the images with:"
-        echo "  docker build --platform linux/amd64 --network=host -t clickhouse/fasttest:local ${REPO_ROOT}/ci/docker/fasttest/"
-        echo "  docker build --platform linux/amd64 --network=host --build-arg FROM_TAG=local -t clickhouse/binary-builder:local ${REPO_ROOT}/ci/docker/binary-builder/"
+        echo "  docker build --network=host -t clickhouse/fasttest:local ${REPO_ROOT}/ci/docker/fasttest/"
+        echo "  docker build --network=host --build-arg FROM_TAG=local -t clickhouse/binary-builder:local ${REPO_ROOT}/ci/docker/binary-builder/"
         exit 1
     fi
 fi
@@ -132,7 +132,7 @@ if [[ -n "${BUILD_JOBS}" ]]; then
 fi
 JOB_EXPORTS="${JOB_EXPORTS}export CARGO_BUILD_JOBS=${CARGO_JOBS}; export CARGO_BUILD_RUSTC_WRAPPER=; "
 
-docker run --rm --platform linux/amd64 \
+docker run --rm \
   -v "${REPO_ROOT}:/ClickHouse" \
   -v "${CACHE_DIR}:/root/.cache/sccache" \
   -w /ClickHouse \
@@ -142,7 +142,7 @@ docker run --rm --platform linux/amd64 \
 
 sync_rust_locks_to_vendor >> "${LOG_FILE}" 2>&1
 
-docker run --rm --platform linux/amd64 \
+docker run --rm \
   -v "${REPO_ROOT}:/ClickHouse" \
   -v "${CACHE_DIR}:/root/.cache/sccache" \
   -w /ClickHouse \
