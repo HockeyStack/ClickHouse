@@ -317,6 +317,8 @@ function(clickhouse_import_crate)
             LOCKED
             FLAGS --offline
             NO_DEFAULT_FEATURES
+            # USES_TERMINAL puts every Cargo build in the Ninja console pool, which runs them one at a time
+            NO_USES_TERMINAL
     )
     enable_dummy_launchers_if_needed()
 endfunction()
