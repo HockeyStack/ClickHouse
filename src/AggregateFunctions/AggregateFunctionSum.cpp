@@ -44,13 +44,24 @@ struct SumKahan
     using Function = AggregateFunctionSum<T, ResultType, AggregateDataType, AggregateFunctionTypeSumKahan>;
 };
 
+template <typename T, AggregateFunctionSumType Type>
+struct SumNeumaier
+{
+    using ResultType = Float64;
+    using AggregateDataType = AggregateFunctionSumNeumaierData<ResultType>;
+    using Function = AggregateFunctionSum<T, ResultType, AggregateDataType, Type>;
+};
+
 template <typename T> using AggregateFunctionSumSimple = typename SumSimple<T>::Function;
 template <typename T> using AggregateFunctionSumWithOverflow = typename SumSameType<T>::Function;
 template <typename T> using AggregateFunctionSumKahan =
     std::conditional_t<is_decimal<T>, typename SumSimple<T>::Function, typename SumKahan<T>::Function>;
+template <typename T> using AggregateFunctionSumNeumaier = std::conditional_t<is_decimal<T>,
+    typename SumSimple<T>::Function, typename SumNeumaier<T, AggregateFunctionTypeSumNeumaier>::Function>;
+template <typename T> using AggregateFunctionSumNeumaierHiLo = typename SumNeumaier<T, AggregateFunctionTypeSumNeumaierHiLo>::Function;
 
 
-template <template <typename> class Function>
+template <template <typename> class Function, bool supports_decimal = true>
 AggregateFunctionPtr createAggregateFunctionSum(const std::string & name, const DataTypes & argument_types, const Array & parameters, const Settings *)
 {
     assertNoParameters(name, parameters);
@@ -59,7 +70,10 @@ AggregateFunctionPtr createAggregateFunctionSum(const std::string & name, const 
     AggregateFunctionPtr res;
     const DataTypePtr & data_type = argument_types[0];
     if (isDecimal(data_type))
-        res.reset(createWithDecimalType<Function>(*data_type, *data_type, argument_types));
+    {
+        if constexpr (supports_decimal)
+            res.reset(createWithDecimalType<Function>(*data_type, *data_type, argument_types));
+    }
     else
         res.reset(createWithNumericType<Function>(*data_type, argument_types));
 
@@ -206,6 +220,84 @@ SELECT sum(0.1), sumKahan(0.1) FROM numbers(10);
     FunctionDocumentation documentation_kahan = {description_kahan, syntax_kahan, arguments_kahan, {}, returned_value_kahan, examples_kahan, introduced_in_kahan, category_kahan};
 
     factory.registerFunction("sumKahan", {createAggregateFunctionSum<AggregateFunctionSumKahan>, documentation_kahan});
+
+    FunctionDocumentation::Description description_neumaier = R"(
+Calculates the sum of the numbers with the [Neumaier compensated summation algorithm](https://en.wikipedia.org/wiki/Kahan_summation_algorithm#Further_enhancements),
+also known as Kahan-Babuska summation.
+Unlike [`sumKahan`](/reference/functions/aggregate-functions/sumKahan), it keeps the compensation when a value is larger in magnitude than the running sum,
+for example when large values cancel each other.
+Slower than [`sum`](/reference/functions/aggregate-functions/sum) function.
+The compensation works only for [Float](/reference/data-types/float) types.
+    )";
+    FunctionDocumentation::Syntax syntax_neumaier = R"(
+sumNeumaier(x)
+    )";
+    FunctionDocumentation::Arguments arguments_neumaier = {
+        {"x", "Input value.", {"Integer", "Float", "Decimal"}}
+    };
+    FunctionDocumentation::ReturnedValue returned_value_neumaier = {
+        "Returns the sum of numbers.", {"Float64", "Decimal"}
+    };
+    FunctionDocumentation::Examples examples_neumaier = {
+    {
+        "Large values that cancel each other",
+        R"(
+SELECT sum(x), sumKahan(x), sumNeumaier(x) FROM values('x Float64', 1000, 1e-18, -1000);
+        )",
+        R"(
+┌─sum(x)─┬─sumKahan(x)─┬─sumNeumaier(x)─┐
+│      0 │           0 │          1e-18 │
+└────────┴─────────────┴────────────────┘
+        )"
+    }
+    };
+    FunctionDocumentation::IntroducedIn introduced_in_neumaier = {26, 8};
+    FunctionDocumentation::Category category_neumaier = FunctionDocumentation::Category::AggregateFunction;
+    FunctionDocumentation documentation_neumaier = {description_neumaier, syntax_neumaier, arguments_neumaier, {}, returned_value_neumaier, examples_neumaier, introduced_in_neumaier, category_neumaier};
+
+    factory.registerFunction("sumNeumaier", {createAggregateFunctionSum<AggregateFunctionSumNeumaier>, documentation_neumaier});
+
+    FunctionDocumentation::Description description_neumaier_hi_lo = R"(
+Calculates the sum of the numbers like [`sumNeumaier`](/reference/functions/aggregate-functions/sumNeumaier), and returns it as two parts:
+`hi` is the result of `sumNeumaier`, and `lo` is the remainder that `hi` cannot hold.
+The difference of two running sums keeps its precision when the parts are subtracted separately: `(a.hi - b.hi) + (a.lo - b.lo)`.
+If the sum is not finite, `hi` is the sum and `lo` is zero.
+    )";
+    FunctionDocumentation::Syntax syntax_neumaier_hi_lo = R"(
+sumNeumaierHiLo(x)
+    )";
+    FunctionDocumentation::Arguments arguments_neumaier_hi_lo = {
+        {"x", "Input value.", {"(U)Int*", "Float*"}}
+    };
+    FunctionDocumentation::ReturnedValue returned_value_neumaier_hi_lo = {
+        "Returns the sum of numbers as a tuple `(hi, lo)`.", {"Tuple(hi Float64, lo Float64)"}
+    };
+    FunctionDocumentation::Examples examples_neumaier_hi_lo = {
+    {
+        "A small window of a running sum after a large value",
+        R"(
+SELECT n, s.hi, s.lo, (s.hi - first_s.hi) + (s.lo - first_s.lo) AS since_first
+FROM
+(
+    SELECT n, s, first_value(s) OVER (ORDER BY n) AS first_s
+    FROM (SELECT n, sumNeumaierHiLo(x) OVER (ORDER BY n) AS s FROM values('n UInt8, x Float64', (1, 1e20), (2, 1), (3, 1)))
+)
+ORDER BY n;
+        )",
+        R"(
+┌─n─┬──────────────────s.hi─┬─s.lo─┬─since_first─┐
+│ 1 │ 100000000000000000000 │    0 │           0 │
+│ 2 │ 100000000000000000000 │    1 │           1 │
+│ 3 │ 100000000000000000000 │    2 │           2 │
+└───┴───────────────────────┴──────┴─────────────┘
+        )"
+    }
+    };
+    FunctionDocumentation::IntroducedIn introduced_in_neumaier_hi_lo = {26, 8};
+    FunctionDocumentation::Category category_neumaier_hi_lo = FunctionDocumentation::Category::AggregateFunction;
+    FunctionDocumentation documentation_neumaier_hi_lo = {description_neumaier_hi_lo, syntax_neumaier_hi_lo, arguments_neumaier_hi_lo, {}, returned_value_neumaier_hi_lo, examples_neumaier_hi_lo, introduced_in_neumaier_hi_lo, category_neumaier_hi_lo};
+
+    factory.registerFunction("sumNeumaierHiLo", {createAggregateFunctionSum<AggregateFunctionSumNeumaierHiLo, false>, documentation_neumaier_hi_lo});
 }
 
 }

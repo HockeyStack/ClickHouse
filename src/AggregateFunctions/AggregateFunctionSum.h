@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <type_traits>
@@ -8,6 +9,8 @@
 #include <IO/ReadHelpers.h>
 
 #include <DataTypes/DataTypesDecimal.h>
+#include <DataTypes/DataTypeTuple.h>
+#include <Columns/ColumnTuple.h>
 #include <Columns/ColumnVector.h>
 
 #include <AggregateFunctions/IAggregateFunction.h>
@@ -428,12 +431,120 @@ struct AggregateFunctionSumKahanData
     }
 };
 
+/// Neumaier (Kahan-Babuska) summation: `sum` is the plain running sum, and `compensation` accumulates
+/// the exact rounding error of each addition, found with the TwoSum transformation.
+template <typename T>
+struct AggregateFunctionSumNeumaierData
+{
+    static_assert(is_floating_point<T>,
+        "It doesn't make sense to use Neumaier Summation algorithm for non floating point types");
+
+    T sum{};
+    T compensation{};
+
+    static void ALWAYS_INLINE addImpl(T value, T & out_sum, T & out_compensation)
+    {
+        /// TwoSum depends on non-associativity of float arithmetic. Do not simplify these expressions.
+        T new_sum = out_sum + value;
+        T value_part = new_sum - out_sum;
+        out_compensation += (out_sum - (new_sum - value_part)) + (value - value_part);
+        out_sum = new_sum;
+    }
+
+    void ALWAYS_INLINE add(T value)
+    {
+        addImpl(value, sum, compensation);
+    }
+
+    template <typename Value, typename Filter>
+    void ALWAYS_INLINE addManyFiltered(const Value * __restrict ptr, size_t start, size_t end, Filter filter)
+    {
+        constexpr size_t unroll_count = 4;
+        T partial_sums[unroll_count]{};
+        T partial_compensations[unroll_count]{};
+
+        size_t i = start;
+        for (; i + unroll_count <= end; i += unroll_count)
+            for (size_t j = 0; j < unroll_count; ++j)
+                if (filter(i + j))
+                    addImpl(static_cast<T>(ptr[i + j]), partial_sums[j], partial_compensations[j]);
+
+        for (size_t j = 0; j < unroll_count; ++j)
+            mergeImpl(partial_sums[j], partial_compensations[j]);
+
+        for (; i < end; ++i)
+            if (filter(i))
+                add(static_cast<T>(ptr[i]));
+    }
+
+    template <typename Value>
+    void NO_INLINE addMany(const Value * __restrict ptr, size_t start, size_t end)
+    {
+        addManyFiltered(ptr, start, end, [](size_t) { return true; });
+    }
+
+    template <typename Value>
+    void NO_INLINE addManyNotNull(const Value * __restrict ptr, const UInt8 * __restrict null_map, size_t start, size_t end)
+    {
+        addManyFiltered(ptr, start, end, [null_map](size_t i) { return !null_map[i]; });
+    }
+
+    template <typename Value>
+    void NO_INLINE addManyConditional(const Value * __restrict ptr, const UInt8 * __restrict cond_map, size_t start, size_t end)
+    {
+        addManyFiltered(ptr, start, end, [cond_map](size_t i) { return cond_map[i] != 0; });
+    }
+
+    void ALWAYS_INLINE mergeImpl(T from_sum, T from_compensation)
+    {
+        add(from_sum);
+        compensation += from_compensation;
+    }
+
+    void merge(const AggregateFunctionSumNeumaierData & rhs)
+    {
+        mergeImpl(rhs.sum, rhs.compensation);
+    }
+
+    void write(WriteBuffer & buf) const
+    {
+        writeBinary(sum, buf);
+        writeBinary(compensation, buf);
+    }
+
+    void read(ReadBuffer & buf)
+    {
+        readBinary(sum, buf);
+        readBinary(compensation, buf);
+    }
+
+    /// A non-finite sum makes the compensation NaN, so the result is the plain sum, as in `sum`.
+    T get() const
+    {
+        return std::isfinite(sum) ? sum + compensation : sum;
+    }
+
+    /// The result as an unevaluated pair: `hi` is the result of `get`, and `lo` is the exact remainder.
+    /// The difference of two running sums keeps its precision when the parts are subtracted separately.
+    std::pair<T, T> getHiLo() const
+    {
+        if (!std::isfinite(sum))
+            return {sum, 0};
+
+        T hi = sum + compensation;
+        T compensation_part = hi - sum;
+        return {hi, (sum - (hi - compensation_part)) + (compensation - compensation_part)};
+    }
+};
+
 
 enum AggregateFunctionSumType
 {
     AggregateFunctionTypeSum,
     AggregateFunctionTypeSumWithOverflow,
     AggregateFunctionTypeSumKahan,
+    AggregateFunctionTypeSumNeumaier,
+    AggregateFunctionTypeSumNeumaierHiLo,
 };
 /// Counts the sum of the numbers.
 template <typename T, typename TResult, typename Data, AggregateFunctionSumType Type>
@@ -452,6 +563,10 @@ public:
             return "sumWithOverflow";
         else if constexpr (Type == AggregateFunctionTypeSumKahan)
             return "sumKahan";
+        else if constexpr (Type == AggregateFunctionTypeSumNeumaier)
+            return "sumNeumaier";
+        else if constexpr (Type == AggregateFunctionTypeSumNeumaierHiLo)
+            return "sumNeumaierHiLo";
     }
 
     explicit AggregateFunctionSum(const DataTypes & argument_types_)
@@ -464,7 +579,12 @@ public:
 
     static DataTypePtr createResultType(UInt32 scale_)
     {
-        if constexpr (!is_decimal<T>)
+        if constexpr (Type == AggregateFunctionTypeSumNeumaierHiLo)
+        {
+            auto part_type = std::make_shared<DataTypeNumber<TResult>>();
+            return std::make_shared<DataTypeTuple>(DataTypes{part_type, part_type}, Strings{"hi", "lo"});
+        }
+        else if constexpr (!is_decimal<T>)
             return std::make_shared<DataTypeNumber<TResult>>();
         else
         {
@@ -574,14 +694,23 @@ public:
 
     void insertResultInto(AggregateDataPtr __restrict place, IColumn & to, Arena *) const override
     {
-        castColumnToResult(to).getData().push_back(this->data(place).get());
+        if constexpr (Type == AggregateFunctionTypeSumNeumaierHiLo)
+        {
+            auto [hi, lo] = this->data(place).getHiLo();
+            auto & tuple = assert_cast<ColumnTuple &>(to);
+            assert_cast<ColumnVector<TResult> &>(tuple.getColumn(0)).getData().push_back(hi);
+            assert_cast<ColumnVector<TResult> &>(tuple.getColumn(1)).getData().push_back(lo);
+        }
+        else
+            castColumnToResult(to).getData().push_back(this->data(place).get());
     }
 
 #if USE_EMBEDDED_COMPILER
 
     bool isCompilable() const override
     {
-        if constexpr (Type == AggregateFunctionTypeSumKahan)
+        if constexpr (Type == AggregateFunctionTypeSumKahan || Type == AggregateFunctionTypeSumNeumaier
+            || Type == AggregateFunctionTypeSumNeumaierHiLo)
             return false;
 
         bool can_be_compiled = true;
