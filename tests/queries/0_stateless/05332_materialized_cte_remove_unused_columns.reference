@@ -1,0 +1,24 @@
+unused column is not computed
+90
+storage keeps the columns of all references
+495
+45	450
+no column is read
+100
+nested materialized CTE
+135
+subquery inside the CTE body
+90
+scalar subquery reads another column
+90	90
+DISTINCT keeps all columns
+12
+12
+aggregate without GROUP BY
+2
+GLOBAL IN on a remote table
+20
+IN reads all columns of the table
+5
+scalar subquery with two references
+450	4500

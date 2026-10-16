@@ -7,10 +7,14 @@
 #include <Analyzer/FunctionNode.h>
 #include <Analyzer/QueryNode.h>
 #include <Analyzer/SortNode.h>
+#include <Analyzer/TableNode.h>
 #include <Analyzer/UnionNode.h>
 #include <Analyzer/Utils.h>
 
 #include <Analyzer/traverseQueryTree.h>
+
+#include <Interpreters/MaterializedCTE.h>
+#include <Storages/IStorage.h>
 
 namespace DB
 {
@@ -90,11 +94,103 @@ void updateUsedProjectionIndexes(const QueryTreeNodePtr & query_or_union_node, s
     }
 }
 
+void removeUnusedProjectionColumns(const QueryTreeNodePtr & query_or_union_node, const std::unordered_set<std::string> & used_columns)
+{
+    /// can't remove columns from distinct, see example - 03023_remove_unused_column_distinct.sql
+    if (auto * query_node = query_or_union_node->as<QueryNode>(); query_node && query_node->isDistinct())
+        return;
+
+    auto used_projection_indexes = convertUsedColumnNamesToUsedProjectionIndexes(query_or_union_node, used_columns);
+    updateUsedProjectionIndexes(query_or_union_node, used_projection_indexes);
+
+    /// Keep at least 1 column if used projection columns are empty
+    if (used_projection_indexes.empty())
+        used_projection_indexes.insert(0);
+
+    if (auto * union_node = query_or_union_node->as<UnionNode>())
+        union_node->removeUnusedProjectionColumns(used_projection_indexes);
+    else if (auto * query_node = query_or_union_node->as<QueryNode>())
+        query_node->removeUnusedProjectionColumns(used_projection_indexes);
 }
 
-void RemoveUnusedProjectionColumnsPass::run(QueryTreeNodePtr & query_tree_node, ContextPtr /*context*/)
+struct MaterializedCTEUsage
+{
+    std::vector<TableNode *> references;
+    std::unordered_set<std::string> used_columns;
+};
+
+using MaterializedCTEUsages = std::unordered_map<MaterializedCTEPtr, MaterializedCTEUsage>;
+
+bool canRemoveUnusedColumns(const MaterializedCTE & materialized_cte, const MaterializedCTEUsage & usage)
+{
+    return materialized_cte.reference_count != 0
+        && usage.references.size() == materialized_cte.reference_count
+        && !materialized_cte.hasPlanOrBuilt()
+        && !materialized_cte.is_materialization_planned.load();
+}
+
+/// All subqueries of one materialized CTE write to one storage, so they keep the same columns.
+void removeUnusedMaterializedCTEColumns(const MaterializedCTE & materialized_cte, const MaterializedCTEUsage & usage, const ContextPtr & context)
+{
+    for (auto * reference : usage.references)
+        removeUnusedProjectionColumns(reference->getMaterializedCTESubquery(), usage.used_columns);
+
+    const auto & subquery = usage.references.front()->getMaterializedCTESubquery();
+    const auto & projection_columns = subquery->as<QueryNode>()
+        ? subquery->as<QueryNode>()->getProjectionColumns()
+        : subquery->as<UnionNode>()->computeProjectionColumns();
+
+    NamesAndTypesList columns;
+    for (const auto & column : projection_columns)
+        columns.emplace_back(column.name, column.type);
+
+    const auto & storage = materialized_cte.storage;
+    auto metadata_handle = storage->getInMemoryMetadataPtr(context, false);
+    auto metadata = *metadata_handle;
+    metadata.setColumns(ColumnsDescription(std::move(columns), false));
+    storage->setInMemoryMetadata(metadata);
+
+    for (auto * reference : usage.references)
+        reference->updateStorage(storage, context);
+}
+
+/// A CTE that is read from the subquery of another CTE gets all its references after that subquery is visited.
+void visitMaterializedCTESubqueries(MaterializedCTEUsages & usages, QueryTreeNodes & nodes_to_visit, const ContextPtr & context)
+{
+    auto visit = [&](const MaterializedCTEUsage & usage)
+    {
+        for (auto * reference : usage.references)
+            nodes_to_visit.push_back(reference->getMaterializedCTESubquery());
+    };
+
+    for (auto it = usages.begin(); it != usages.end();)
+    {
+        const auto & [materialized_cte, usage] = *it;
+        if (!canRemoveUnusedColumns(*materialized_cte, usage))
+        {
+            ++it;
+            continue;
+        }
+
+        removeUnusedMaterializedCTEColumns(*materialized_cte, usage, context);
+        visit(usage);
+        it = usages.erase(it);
+    }
+
+    if (!nodes_to_visit.empty())
+        return;
+
+    for (const auto & [_, usage] : usages)
+        visit(usage);
+    usages.clear();
+}
+
+}
+
+void RemoveUnusedProjectionColumnsPass::run(QueryTreeNodePtr & query_tree_node, ContextPtr context)
 {
     QueryTreeNodes nodes_to_visit = { query_tree_node };
+    MaterializedCTEUsages materialized_cte_usages;
 
     while (!nodes_to_visit.empty())
     {
@@ -103,24 +199,31 @@ void RemoveUnusedProjectionColumnsPass::run(QueryTreeNodePtr & query_tree_node, 
 
         std::unordered_set<QueryTreeNodePtr> subqueries_nodes_to_visit;
         std::unordered_map<QueryTreeNodePtr, std::unordered_set<std::string>> node_to_used_columns;
+        std::unordered_set<QueryTreeNodePtr> table_expressions;
 
         /// Initialize map with query and union nodes in the FROM clause
         if (auto * query_node = node_to_visit->as<QueryNode>())
         {
             for (const auto & table_expression : extractTableExpressions(query_node->getJoinTreeNodeTyped()))
+            {
                 if (isQueryOrUnionNode(table_expression))
                     node_to_used_columns.emplace(table_expression, std::unordered_set<std::string>());
+                table_expressions.insert(table_expression);
+            }
         }
 
         /// Collect information about what columns are used in the query.
         traverseQueryTree(node_to_visit,
             [&subqueries_nodes_to_visit, &node_to_used_columns](
-                const QueryTreeNodePtr & /*parent*/,
+                const QueryTreeNodePtr & parent,
                 const QueryTreeNodePtr & child
             )
             {
                 if (isQueryOrUnionNode(child))
                 {
+                    if (parent->as<TableNode>())
+                        return false;
+
                     subqueries_nodes_to_visit.insert(child);
 
                     auto * query_node = child->as<QueryNode>();
@@ -142,8 +245,20 @@ void RemoveUnusedProjectionColumnsPass::run(QueryTreeNodePtr & query_tree_node, 
                 }
                 return true;
             },
-            [&node_to_used_columns](const QueryTreeNodePtr & node)
+            [&node_to_used_columns, &table_expressions, &materialized_cte_usages](const QueryTreeNodePtr & node)
             {
+                if (auto * table_node = node->as<TableNode>(); table_node && table_node->isMaterializedCTE())
+                {
+                    auto & usage = materialized_cte_usages[table_node->getMaterializedCTE()];
+                    usage.references.push_back(table_node);
+
+                    /// `x IN t` reads all columns of `t`.
+                    if (!table_expressions.contains(node))
+                        for (const auto & column_name : table_node->getStorageSnapshot()->metadata->getColumns().getNamesOfPhysical())
+                            usage.used_columns.insert(column_name);
+                    return;
+                }
+
                 const auto node_type = node->getNodeType();
                 if (node_type != QueryTreeNodeType::COLUMN)
                     return;
@@ -153,6 +268,11 @@ void RemoveUnusedProjectionColumnsPass::run(QueryTreeNodePtr & query_tree_node, 
                     return;
 
                 auto column_source_node = column_node.getColumnSource();
+                if (auto * table_node = column_source_node->as<TableNode>(); table_node && table_node->isMaterializedCTE())
+                {
+                    materialized_cte_usages[table_node->getMaterializedCTE()].used_columns.insert(column_node.getColumnName());
+                    return;
+                }
 
                 auto it = node_to_used_columns.find(column_source_node);
                 /// If the source node is not found in the map then:
@@ -166,29 +286,13 @@ void RemoveUnusedProjectionColumnsPass::run(QueryTreeNodePtr & query_tree_node, 
 
         /// Pass information about used columns to subqueries and remove unused projection columns
         for (auto & [query_or_union_node, used_columns] : node_to_used_columns)
-        {
-            /// can't remove columns from distinct, see example - 03023_remove_unused_column_distinct.sql
-            if (auto * query_node = query_or_union_node->as<QueryNode>())
-            {
-                if (query_node->isDistinct())
-                    continue;
-            }
-
-            auto used_projection_indexes = convertUsedColumnNamesToUsedProjectionIndexes(query_or_union_node, used_columns);
-            updateUsedProjectionIndexes(query_or_union_node, used_projection_indexes);
-
-            /// Keep at least 1 column if used projection columns are empty
-            if (used_projection_indexes.empty())
-                used_projection_indexes.insert(0);
-
-            if (auto * union_node = query_or_union_node->as<UnionNode>())
-                union_node->removeUnusedProjectionColumns(used_projection_indexes);
-            else if (auto * query_node = query_or_union_node->as<QueryNode>())
-                query_node->removeUnusedProjectionColumns(used_projection_indexes);
-        }
+            removeUnusedProjectionColumns(query_or_union_node, used_columns);
 
         for (const auto & subquery_node_to_visit : subqueries_nodes_to_visit)
             nodes_to_visit.push_back(subquery_node_to_visit);
+
+        if (nodes_to_visit.empty())
+            visitMaterializedCTESubqueries(materialized_cte_usages, nodes_to_visit, context);
     }
 }
 
