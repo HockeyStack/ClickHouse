@@ -78,6 +78,10 @@ struct MaterializedCTE
     const std::string cte_name;
     /// If true, the CTE query has ORDER BY, so the stored blocks are in that order.
     bool has_order_by = false;
+    /// Number of references with a subquery in the whole query tree, or 0 if unknown.
+    /// `RemoveUnusedProjectionColumnsPass` prunes the CTE only if it sees all of them,
+    /// because passes also run on partial trees (scalar subqueries during analysis).
+    size_t reference_count = 0;
     /// Temporary table name
     const std::string temporary_table_name;
     /// Query Plan for the CTE

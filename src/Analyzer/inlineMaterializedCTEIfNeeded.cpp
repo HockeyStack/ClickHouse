@@ -4,8 +4,10 @@
 #include <unordered_set>
 
 #include <Analyzer/TableNode.h>
+#include <Analyzer/QueryNode.h>
 #include <Analyzer/InDepthQueryTreeVisitor.h>
 #include <Analyzer/traverseQueryTree.h>
+#include <Analyzer/UnionNode.h>
 #include <Analyzer/Utils.h>
 
 #include <Common/SipHash.h>
@@ -174,10 +176,19 @@ void inlineMaterializedCTEIfNeeded(QueryTreeNodePtr & node, ContextPtr context)
     if (use_count.empty())
         return;
 
+    /// Scalar subqueries run all passes on a copy of the subquery during analysis. The copy does not hold the references outside of it.
+    const auto * query_node = node->as<QueryNode>();
+    const auto * union_node = node->as<UnionNode>();
+    bool is_subquery = (query_node && query_node->isSubquery()) || (union_node && union_node->isSubquery());
+
     ReusedMaterializedCTEs reused_materialized_cte;
     for (const auto & [materialized_cte, count] : use_count)
+    {
+        if (!is_subquery)
+            materialized_cte->reference_count = count;
         if (count >= 2)
             reused_materialized_cte.insert(materialized_cte);
+    }
 
     if (context->hasQueryContext())
     {
