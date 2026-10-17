@@ -1,0 +1,9 @@
+single reference
+1	1	one	['k']	1	1
+2	\N	two	['k']	0	2
+reused
+1	\N	1	[1]	1	1
+2	x	2	[2]	0	2
+reused, only subcolumns are read
+1	1	one
+2	\N	two

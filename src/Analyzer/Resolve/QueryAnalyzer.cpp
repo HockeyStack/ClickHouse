@@ -4590,7 +4590,7 @@ void QueryAnalyzer::initializeTableExpressionData(const TableExpressionNodePtr &
         storage_snapshot = table_node ? table_node->getStorageSnapshot() : table_function_node->getStorageSnapshot();
 
         auto get_column_options = GetColumnsOptions(GetColumnsOptions::All).withVirtuals(VirtualsKind::All, VirtualsMaterializationPlace::All);
-        if (storage_snapshot->storage.supportsSubcolumns())
+        if (storage_snapshot->storage.supportsSubcolumns() && !(table_node && table_node->isMaterializedCTE()))
         {
             get_column_options.withSubcolumns();
             table_expression_data.supports_subcolumns = true;
