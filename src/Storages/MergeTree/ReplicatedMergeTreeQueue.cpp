@@ -396,16 +396,40 @@ bool ReplicatedMergeTreeQueue::havePendingPatchPartsForMutation(
 
     for (const auto & fetch_entry : queue)
     {
-        if (fetch_entry->type != LogEntry::GET_PART)
-            continue;
-
-        auto fetch_part_info = MergeTreePartInfo::fromPartName(fetch_entry->new_part_name, format_version);
-        if (fetch_part_info.isPatch() && fetch_part_info.getDataVersion() < data_version)
+        String drop_reason;
+        if (isFetchOfPatchPartForMutation(*fetch_entry, new_part_info) && !drop_parts.isAffectedByDropPart(*fetch_entry, drop_reason))
         {
             constexpr auto fmt_string = "Not executing log entry {} for part {} because at least one patch part {} is not fetched yet";
-            LOG_DEBUG(LogToStr(out_reason, log), fmt_string, entry.znode_name, entry.new_part_name, fetch_part_info.getPartNameForLogs());
+            LOG_DEBUG(LogToStr(out_reason, log), fmt_string, entry.znode_name, entry.new_part_name, fetch_entry->new_part_name);
             return true;
         }
+    }
+
+    return false;
+}
+
+bool ReplicatedMergeTreeQueue::isFetchOfPatchPartForMutation(const LogEntry & fetch_entry, const MergeTreePartInfo & new_part_info) const
+{
+    if (fetch_entry.type != LogEntry::GET_PART)
+        return false;
+
+    auto fetch_part_info = MergeTreePartInfo::fromPartName(fetch_entry.new_part_name, format_version);
+    return fetch_part_info.isPatch() && fetch_part_info.getOriginalPartitionId() == new_part_info.getPartitionId()
+        && fetch_part_info.getDataVersion() < new_part_info.getDataVersion();
+}
+
+bool ReplicatedMergeTreeQueue::isPatchPartForMutationDropped(const MergeTreePartInfo & new_part_info) const
+{
+    if (!storage.supportsLightweightUpdate())
+        return false;
+
+    std::shared_lock lock(state_mutex);
+
+    for (const auto & fetch_entry : queue)
+    {
+        String drop_reason;
+        if (isFetchOfPatchPartForMutation(*fetch_entry, new_part_info) && drop_parts.isAffectedByDropPart(*fetch_entry, drop_reason))
+            return true;
     }
 
     return false;

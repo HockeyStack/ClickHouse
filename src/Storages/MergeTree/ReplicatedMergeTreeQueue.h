@@ -313,6 +313,7 @@ private:
     bool isMergeOfPatchPartsBlocked(const LogEntry & entry, String & out_reason, std::unique_lock<SharedMutex> & /*state_mutex_lock*/) const;
     bool isDropOfPatchPartBlocked(const LogEntry & entry, String & out_reason, std::unique_lock<SharedMutex> & /*state_mutex_lock*/) const;
     bool havePendingPatchPartsForMutation(const LogEntry & entry, String & out_reason, const CommittingBlocks & committing_blocks, std::unique_lock<SharedMutex> & /*state_mutex_lock*/) const;
+    bool isFetchOfPatchPartForMutation(const LogEntry & fetch_entry, const MergeTreePartInfo & new_part_info) const;
 
     /// Marks the element of the queue as running.
     class CurrentlyExecuting
@@ -466,6 +467,11 @@ public:
 
     MutationCommands getMutationCommands(const MergeTreeData::DataPartPtr & part, Int64 desired_mutation_version,
                                          Strings & mutation_ids) const;
+
+    /// Returns true if the queue has a fetch of a patch part that the mutation to `new_part_info` must apply,
+    /// and a DROP_PART of that patch part is queued. The patch part can be gone from all replicas,
+    /// so the mutation must fetch its result.
+    bool isPatchPartForMutationDropped(const MergeTreePartInfo & new_part_info) const;
 
     struct MutationsSnapshot : public MergeTreeData::MutationsSnapshotBase
     {
