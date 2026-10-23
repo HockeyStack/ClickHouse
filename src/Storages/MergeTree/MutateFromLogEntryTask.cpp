@@ -134,6 +134,18 @@ ReplicatedMergeMutateTaskBase::PrepareResult MutateFromLogEntryTask::prepare()
         };
     }
 
+    if (storage.queue.isPatchPartForMutationDropped(new_part_info))
+    {
+        LOG_DEBUG(log, "A patch part for mutation {} is dropped before it was fetched; will try to fetch part instead",
+            entry.new_part_name);
+
+        return PrepareResult{
+            .prepared_successfully = false,
+            .need_to_check_missing_part_in_fetch = true,
+            .part_log_writer = part_log_writer,
+        };
+    }
+
     /// TODO - some better heuristic?
     size_t estimated_space_for_result = CompactionStatistics::estimateNeededDiskSpace({source_part}, false);
 
