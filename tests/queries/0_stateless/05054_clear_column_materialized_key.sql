@@ -14,7 +14,7 @@ ENGINE = MergeTree
 ORDER BY c3;
 
 INSERT INTO t_clear_column_materialized_key (c1) VALUES (10);
-ALTER TABLE t_clear_column_materialized_key CLEAR COLUMN c1; -- { serverError CANNOT_UPDATE_COLUMN }
+ALTER TABLE t_clear_column_materialized_key CLEAR COLUMN c1; -- { serverError ALTER_OF_COLUMN_IS_FORBIDDEN }
 
 -- The same clear is accepted when the derived `MATERIALIZED` columns are not part of the key.
 DROP TABLE IF EXISTS t_clear_column_materialized_not_key;

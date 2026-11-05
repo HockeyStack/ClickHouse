@@ -75,6 +75,7 @@
 #include <Interpreters/InterpreterSelectQuery.h>
 #include <Interpreters/MergeTreeTransaction.h>
 #include <Interpreters/MergeTreeTransaction/VersionMetadataOnDisk.h>
+#include <Interpreters/MaterializedColumnDependencies.h>
 #include <Interpreters/MutationsInterpreter.h>
 #include <Interpreters/PartLog.h>
 #include <Interpreters/TransactionManager.h>
@@ -5798,6 +5799,13 @@ void MergeTreeData::checkAlterEligibility(const AlterCommands & commands, Contex
 
     bool share_nested_offsets = (*getSettings())[MergeTreeSetting::share_nested_offsets];
 
+    NameSet key_columns_to_keep = columns_in_keys;
+    if (!merging_params.sign_column.empty())
+        key_columns_to_keep.insert(merging_params.sign_column);
+    if (!merging_params.version_column.empty())
+        key_columns_to_keep.insert(merging_params.version_column);
+    MaterializedColumnDependencies materialized_dependencies(old_columns, local_context);
+
     /// `ALTER CLEAR COLUMN` is a `DROP_COLUMN` with `clear` set, and it keeps the column in the metadata,
     /// so it could also be checked in the per-command loop below. It is rejected by the same rule, so both
     /// are handled here to keep the check in a single place.
@@ -5859,6 +5867,24 @@ void MergeTreeData::checkAlterEligibility(const AlterCommands & commands, Contex
                     verb,
                     backQuoteIfNeed(command.column_name),
                     backQuotedList(key_columns_in_group));
+            }
+        }
+
+        /// The mutation recalculates the `MATERIALIZED` columns that read a cleared column, which would rewrite a key.
+        if (command.clear)
+        {
+            NameSet cleared_columns = old_columns.has(command.column_name)
+                ? NameSet{command.column_name}
+                : old_columns.getNested(command.column_name).getNameSet();
+
+            for (const auto & key_column : key_columns_to_keep)
+            {
+                if (!materialized_dependencies.findColumnsToRecalculate(key_column, cleared_columns).empty())
+                    throw Exception(
+                        ErrorCodes::ALTER_OF_COLUMN_IS_FORBIDDEN,
+                        "Trying to ALTER CLEAR column {} which recalculates `MATERIALIZED` key column {}",
+                        backQuoteIfNeed(command.column_name),
+                        backQuoteIfNeed(key_column));
             }
         }
     }
