@@ -422,7 +422,7 @@ struct ExpressionFilters
     std::optional<size_t> first_equals_position;
 };
 
-using ComparisonFilterMap = QueryTreeNodePtrWithHashMap<ExpressionFilters>;
+using ComparisonFilterMap = QueryTreeNodePtrWithHashColumnSourceIdentityMap<ExpressionFilters>;
 
 static ValueComparisonResult invertComparisonResult(ValueComparisonResult result)
 {
@@ -1042,7 +1042,7 @@ using IndexedNodes = std::vector<IndexedNode>;
 /// Convert surviving notEquals chains to NOT IN when the chain is long enough.
 /// Output is appended to `output` with original indices for deterministic sorting.
 static void convertNotEqualsChainToNotIn(
-    QueryTreeNodePtrWithHashMap<IndexedNodes> & node_to_not_equals_functions,
+    QueryTreeNodePtrWithHashColumnSourceIdentityMap<IndexedNodes> & node_to_not_equals_functions,
     IndexedNodes & output,
     const ContextPtr & context)
 {
@@ -1923,8 +1923,8 @@ private:
         const bool enable_pruning = getSettings()[Setting::optimize_redundant_comparisons];
 
         ComparisonFilterMap filter_map;
-        QueryTreeNodePtrWithHashMap<QueryTreeNodeConstRawPtrWithHashSet> not_equals_node_to_constants;
-        QueryTreeNodePtrWithHashMap<IndexedNodes> node_to_not_equals_functions;
+        QueryTreeNodePtrWithHashColumnSourceIdentityMap<QueryTreeNodeConstRawPtrWithHashSet> not_equals_node_to_constants;
+        QueryTreeNodePtrWithHashColumnSourceIdentityMap<IndexedNodes> node_to_not_equals_functions;
 
         /// Pass 1: iterate over AND operands, classify each as comparison-with-constant or other.
         IndexedNodes all_operands;
@@ -2550,8 +2550,8 @@ private:
 
         QueryTreeNodes or_operands;
 
-        QueryTreeNodePtrWithHashMap<QueryTreeNodes> node_to_equals_functions;
-        QueryTreeNodePtrWithHashMap<QueryTreeNodeConstRawPtrWithHashSet> node_to_constants;
+        QueryTreeNodePtrWithHashColumnSourceIdentityMap<QueryTreeNodes> node_to_equals_functions;
+        QueryTreeNodePtrWithHashColumnSourceIdentityMap<QueryTreeNodeConstRawPtrWithHashSet> node_to_constants;
 
         for (const auto & argument : function_node.getArguments())
         {

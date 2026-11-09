@@ -147,7 +147,12 @@ bool IQueryTreeNode::isEqual(const IQueryTreeNode & rhs, CompareOptions compare_
             if (bool(lhs_source) != bool(rhs_source))
                 return false;
 
-            if (lhs_source && rhs_source)
+            if (compare_options.compare_column_sources_by_identity)
+            {
+                if (lhs_source != rhs_source)
+                    return false;
+            }
+            else if (lhs_source && rhs_source)
                 nodes_to_process.emplace_back(lhs_source.get(), rhs_source.get());
         }
 
@@ -227,7 +232,12 @@ IQueryTreeNode::Hash IQueryTreeNode::getTreeHash(CompareOptions compare_options)
         if (const auto * column_node = node_to_process->as<ColumnNode>())
         {
             if (auto source = column_node->getColumnSourceOrNull())
-                nodes_to_process.emplace_back(source.get(), true);
+            {
+                if (compare_options.compare_column_sources_by_identity)
+                    hash_state.update(reinterpret_cast<uintptr_t>(source.get()));
+                else
+                    nodes_to_process.emplace_back(source.get(), true);
+            }
         }
     }
 

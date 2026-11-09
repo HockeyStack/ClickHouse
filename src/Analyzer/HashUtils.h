@@ -18,32 +18,39 @@ using QueryTreeNodePtr = std::shared_ptr<IQueryTreeNode>;
   * Example of usage:
   * std::unordered_map<QueryTreeNodeConstRawPtrWithHash, std::string> map;
   */
-template <typename QueryTreeNodePtrType, bool compare_aliases = true>
+template <typename QueryTreeNodePtrType, bool compare_aliases = true, bool compare_column_sources_by_identity = false>
 struct QueryTreeNodeWithHash
 {
     QueryTreeNodeWithHash(QueryTreeNodePtrType node_) /// NOLINT
         : node(std::move(node_))
-        , hash(node->getTreeHash({.compare_aliases = compare_aliases}))
+        , hash(node->getTreeHash({.compare_aliases = compare_aliases, .compare_column_sources_by_identity = compare_column_sources_by_identity}))
     {}
 
     QueryTreeNodePtrType node = nullptr;
     CityHash_v1_0_2::uint128 hash;
 };
 
-template <typename T, bool compare_aliases>
-inline bool operator==(const QueryTreeNodeWithHash<T, compare_aliases> & lhs, const QueryTreeNodeWithHash<T, compare_aliases> & rhs)
+template <typename T, bool compare_aliases, bool compare_column_sources_by_identity>
+inline bool operator==(
+    const QueryTreeNodeWithHash<T, compare_aliases, compare_column_sources_by_identity> & lhs,
+    const QueryTreeNodeWithHash<T, compare_aliases, compare_column_sources_by_identity> & rhs)
 {
-    return lhs.hash == rhs.hash && lhs.node->isEqual(*rhs.node, {.compare_aliases = compare_aliases});
+    return lhs.hash == rhs.hash
+        && lhs.node->isEqual(*rhs.node, {.compare_aliases = compare_aliases, .compare_column_sources_by_identity = compare_column_sources_by_identity});
 }
 
-template <typename T, bool compare_aliases>
-inline bool operator!=(const QueryTreeNodeWithHash<T, compare_aliases> & lhs, const QueryTreeNodeWithHash<T, compare_aliases> & rhs)
+template <typename T, bool compare_aliases, bool compare_column_sources_by_identity>
+inline bool operator!=(
+    const QueryTreeNodeWithHash<T, compare_aliases, compare_column_sources_by_identity> & lhs,
+    const QueryTreeNodeWithHash<T, compare_aliases, compare_column_sources_by_identity> & rhs)
 {
     return !(lhs == rhs);
 }
 
 using QueryTreeNodePtrWithHash = QueryTreeNodeWithHash<QueryTreeNodePtr>;
 using QueryTreeNodePtrWithHashIgnoreAliases = QueryTreeNodeWithHash<QueryTreeNodePtr, /*compare_aliases*/ false>;
+using QueryTreeNodePtrWithHashColumnSourceIdentity
+    = QueryTreeNodeWithHash<QueryTreeNodePtr, /*compare_aliases*/ true, /*compare_column_sources_by_identity*/ true>;
 using QueryTreeNodeRawPtrWithHash = QueryTreeNodeWithHash<IQueryTreeNode *>;
 using QueryTreeNodeConstRawPtrWithHash = QueryTreeNodeWithHash<const IQueryTreeNode *>;
 
@@ -57,6 +64,9 @@ using QueryTreeNodePtrWithHashMap = std::unordered_map<QueryTreeNodePtrWithHash,
 template <typename Value>
 using QueryTreeNodePtrWithHashIgnoreAliasesMap = std::unordered_map<QueryTreeNodePtrWithHashIgnoreAliases, Value>;
 
+template <typename Value>
+using QueryTreeNodePtrWithHashColumnSourceIdentityMap = std::unordered_map<QueryTreeNodePtrWithHashColumnSourceIdentity, Value>;
+
 class ColumnNode;
 using ColumnNodePtr = std::shared_ptr<ColumnNode>;
 using ColumnNodePtrWithHash = QueryTreeNodeWithHash<ColumnNodePtr>;
@@ -64,10 +74,10 @@ using ColumnNodePtrWithHashSet = std::unordered_set<ColumnNodePtrWithHash>;
 
 }
 
-template <typename T, bool compare_aliases>
-struct std::hash<DB::QueryTreeNodeWithHash<T, compare_aliases>>
+template <typename T, bool compare_aliases, bool compare_column_sources_by_identity>
+struct std::hash<DB::QueryTreeNodeWithHash<T, compare_aliases, compare_column_sources_by_identity>>
 {
-    size_t operator()(const DB::QueryTreeNodeWithHash<T, compare_aliases> & node_with_hash) const
+    size_t operator()(const DB::QueryTreeNodeWithHash<T, compare_aliases, compare_column_sources_by_identity> & node_with_hash) const
     {
         return node_with_hash.hash.low64;
     }
